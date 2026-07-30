@@ -450,13 +450,19 @@ function telHref(contact: string): string | null {
   return `tel:+${digits}`;
 }
 
-function mapsUrl(merchant: Merchant): string {
+function destinationQuery(merchant: Merchant): string {
   const { latitude, longitude, fantasyName, address } = merchant;
-  const query =
-    latitude !== null && longitude !== null
-      ? `${latitude},${longitude}`
-      : `${fantasyName} ${address}`;
-  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+  return latitude !== null && longitude !== null
+    ? `${latitude},${longitude}`
+    : `${fantasyName} ${address}`;
+}
+
+function mapsUrl(merchant: Merchant): string {
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(destinationQuery(merchant))}`;
+}
+
+function walkUrl(merchant: Merchant): string {
+  return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(destinationQuery(merchant))}&travelmode=walking`;
 }
 
 function Highlight({ text, range }: { text: string; range: MatchRange | null }) {
@@ -505,6 +511,14 @@ function HitRow({ hit }: { hit: MerchantHit }) {
             className="text-stone-400 underline decoration-dotted hover:text-red-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-500"
           >
             mapa
+          </a>
+          <a
+            href={walkUrl(merchant)}
+            target="_blank"
+            rel="noreferrer noopener"
+            className="text-stone-400 underline decoration-dotted hover:text-red-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-500"
+          >
+            a pé
           </a>
         </div>
       </div>
