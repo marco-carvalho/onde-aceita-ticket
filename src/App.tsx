@@ -6,7 +6,13 @@ import {
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query';
-import { useCallback, useEffect, useState, type KeyboardEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useState,
+  type KeyboardEvent,
+  type ReactElement,
+} from 'react';
 
 const FALLBACK_LAT = -3.735;
 const FALLBACK_LON = -38.505;
@@ -331,7 +337,9 @@ interface Compiled {
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
-    const abort = () => reject(new DOMException('consulta cancelada', 'AbortError'));
+    const abort = (): void => {
+      reject(new DOMException('consulta cancelada', 'AbortError'));
+    };
     if (signal?.aborted) {
       abort();
       return;
@@ -340,7 +348,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
       signal?.removeEventListener('abort', onAbort);
       resolve();
     }, ms);
-    function onAbort() {
+    function onAbort(): void {
       clearTimeout(timer);
       abort();
     }
@@ -392,8 +400,12 @@ async function runSearch(request: SearchRequest): Promise<SearchOutcome> {
   let listing: MerchantHit[] | null = null;
   let done = 0;
 
-  const trackPage = (page: number) => request.onProgress?.({ done, total, page });
-  const finishStep = () => request.onProgress?.({ done: ++done, total, page: 0 });
+  const trackPage = (page: number): void => {
+    request.onProgress?.({ done, total, page });
+  };
+  const finishStep = (): void => {
+    request.onProgress?.({ done: ++done, total, page: 0 });
+  };
 
   if (needsSweep(terms, regexes.length)) {
     const paged = await fetchAllPages(request.params, '', request.signal, trackPage);
@@ -450,22 +462,16 @@ function telHref(contact: string): string | null {
   return `tel:+${digits}`;
 }
 
-function destinationQuery(merchant: Merchant): string {
-  const { latitude, longitude, fantasyName, address } = merchant;
-  return latitude !== null && longitude !== null
-    ? `${latitude},${longitude}`
-    : `${fantasyName} ${address}`;
-}
-
-function mapsUrl(merchant: Merchant): string {
-  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(destinationQuery(merchant))}`;
-}
-
 function walkUrl(merchant: Merchant): string {
-  return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(destinationQuery(merchant))}&travelmode=walking`;
+  const { latitude, longitude, fantasyName, address } = merchant;
+  const destination =
+    latitude !== null && longitude !== null
+      ? `${latitude},${longitude}`
+      : `${fantasyName} ${address}`;
+  return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(destination)}&travelmode=walking`;
 }
 
-function Highlight({ text, range }: { text: string; range: MatchRange | null }) {
+function Highlight({ text, range }: { text: string; range: MatchRange | null }): ReactElement {
   if (!range) return <>{text}</>;
   const [start, end] = range;
   if (start < 0 || end > text.length || start >= end) return <>{text}</>;
@@ -481,7 +487,7 @@ function Highlight({ text, range }: { text: string; range: MatchRange | null }) 
   );
 }
 
-function HitRow({ hit }: { hit: MerchantHit }) {
+function HitRow({ hit }: { hit: MerchantHit }): ReactElement {
   const { merchant } = hit;
   const phone = telHref(merchant.contact);
   const cnpj = formatCnpj(merchant.cnpj);
@@ -505,14 +511,6 @@ function HitRow({ hit }: { hit: MerchantHit }) {
             </a>
           )}
           <a
-            href={mapsUrl(merchant)}
-            target="_blank"
-            rel="noreferrer noopener"
-            className="text-stone-400 underline decoration-dotted hover:text-red-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-500"
-          >
-            mapa
-          </a>
-          <a
             href={walkUrl(merchant)}
             target="_blank"
             rel="noreferrer noopener"
@@ -529,7 +527,7 @@ function HitRow({ hit }: { hit: MerchantHit }) {
   );
 }
 
-function ResultCard({ result }: { result: TargetResult }) {
+function ResultCard({ result }: { result: TargetResult }): ReactElement {
   const accepts = result.hits.length > 0;
 
   return (
@@ -578,10 +576,10 @@ function formatHitsForClipboard(hits: MerchantHit[]): string {
   return [header, ...rows].join('\n');
 }
 
-function CopyHitsButton({ hits }: { hits: MerchantHit[] }) {
+function CopyHitsButton({ hits }: { hits: MerchantHit[] }): ReactElement {
   const [status, setStatus] = useState<'idle' | 'copied' | 'failed'>('idle');
 
-  async function copy() {
+  async function copy(): Promise<void> {
     if (hits.length === 0 || !navigator.clipboard?.writeText) {
       setStatus('failed');
       return;
@@ -661,7 +659,7 @@ function CopyHitsButton({ hits }: { hits: MerchantHit[] }) {
   );
 }
 
-function MerchantList({ hits }: { hits: MerchantHit[] }) {
+function MerchantList({ hits }: { hits: MerchantHit[] }): ReactElement {
   return (
     <article className="overflow-hidden rounded-2xl border border-white/10 bg-white/5 backdrop-blur-sm">
       <header className="flex items-center justify-between gap-3 px-4 py-3">
@@ -692,7 +690,7 @@ function MerchantList({ hits }: { hits: MerchantHit[] }) {
   );
 }
 
-function SweepBanner({ meta, radius }: { meta: SweepMeta; radius: number }) {
+function SweepBanner({ meta, radius }: { meta: SweepMeta; radius: number }): ReactElement {
   return (
     <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm backdrop-blur-sm">
       <p className="text-stone-300">
@@ -719,11 +717,11 @@ function TargetsField({
   terms: string[];
   onChange: (terms: string[]) => void;
   disabled: boolean;
-}) {
+}): ReactElement {
   const [draft, setDraft] = useState('');
   const full = terms.length >= MAX_TARGETS;
 
-  function commit(raw: string) {
+  function commit(raw: string): void {
     const term = raw.trim();
     if (!term) return;
 
@@ -732,7 +730,7 @@ function TargetsField({
     setDraft('');
   }
 
-  function onKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+  function onKeyDown(event: KeyboardEvent<HTMLInputElement>): void {
     if (event.key === 'Enter') {
       event.preventDefault();
       commit(draft);
@@ -828,7 +826,7 @@ function SearchPanel({
   onTermsChange,
   onSubmit,
   onCancel,
-}: SearchPanelProps) {
+}: SearchPanelProps): ReactElement {
   const [geoState, setGeoState] = useState<GeoState>(() =>
     'geolocation' in navigator ? 'locating' : 'unsupported',
   );
@@ -853,7 +851,7 @@ function SearchPanel({
     if ('geolocation' in navigator) locate();
   }, [locate]);
 
-  function retryLocation() {
+  function retryLocation(): void {
     setGeoState('locating');
     locate();
   }
@@ -1024,7 +1022,7 @@ function describeError(error: unknown): string {
   return 'Falha inesperada ao consultar a rede credenciada.';
 }
 
-function SearchPage() {
+function SearchPage(): ReactElement {
   const [form, setForm] = useState<FormState>(INITIAL_FORM);
   const [terms, setTerms] = useState<string[]>([]);
 
@@ -1036,7 +1034,7 @@ function SearchPage() {
   const query = useQuery({
     queryKey: ['merchants', search],
     queryFn: search
-      ? ({ signal }) =>
+      ? ({ signal }: { signal: AbortSignal }): Promise<SearchOutcome> =>
           runSearch({
             params: search.params,
             terms: search.terms,
@@ -1051,15 +1049,15 @@ function SearchPage() {
   const error = formError || (query.isError ? describeError(query.error) : '');
   const accepted = outcome?.results.filter((item) => item.hits.length > 0).length ?? 0;
 
-  const patchForm = useCallback((patch: Partial<FormState>) => {
+  const patchForm = useCallback((patch: Partial<FormState>): void => {
     setForm((current) => ({ ...current, ...patch }));
   }, []);
 
-  function cancel() {
+  function cancel(): void {
     void client.cancelQueries({ queryKey: ['merchants', search], exact: true });
   }
 
-  function submit() {
+  function submit(): void {
     const latitude = parseCoordinate(form.lat);
     const longitude = parseCoordinate(form.lon);
     if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
@@ -1207,7 +1205,7 @@ function SearchPage() {
   );
 }
 
-export default function App() {
+export default function App(): ReactElement {
   return (
     <QueryClientProvider client={queryClient}>
       <SearchPage />
