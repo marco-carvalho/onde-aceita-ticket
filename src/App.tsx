@@ -9,15 +9,15 @@ import {
 import {
   useCallback,
   useEffect,
+  useId,
+  useRef,
   useState,
   type KeyboardEvent,
   type ReactElement,
 } from 'react';
 
-const FALLBACK_LAT = -3.735;
-const FALLBACK_LON = -38.505;
-
 const MAX_RADIUS = 10_000;
+const DEFAULT_RADIUS = 500;
 const MAX_PAGE_SIZE = 1000;
 const MAX_PAGES = 10;
 
@@ -31,8 +31,12 @@ const PAGE_SLEEP_MS = 900;
 const MAX_REGEX_LENGTH = 200;
 
 const REQUEST_TIMEOUT_MS = 25_000;
+const GEOCODE_DEBOUNCE_MS = 400;
+const GEOCODE_MIN_CHARS = 3;
 
 const API_URL = 'https://api.ticket.edenred.com/digital_accredited_network/v2/merchant-benefit';
+const NOMINATIM_URL = 'https://nominatim.openstreetmap.org/search';
+const NOMINATIM_REVERSE_URL = 'https://nominatim.openstreetmap.org/reverse';
 
 const HEADERS = {
   accept: 'application/json, text/plain, */*',
@@ -799,14 +803,259 @@ interface FormState {
   benefits: Benefit[];
 }
 
-type GeoState = 'locating' | 'located' | 'denied' | 'unsupported';
+interface GeocodeHit {
+  displayName: string;
+  lat: string;
+  lon: string;
+}
+
+type GeoState = 'locating' | 'located' | 'denied' | 'unsupported' | 'address';
 
 const GEO_MESSAGE: Record<GeoState, string> = {
   locating: 'Buscando sua localização...',
   located: 'Centro na sua localização atual.',
-  denied: 'Localização indisponível, usando Aldeota, em Fortaleza. Ajuste à mão se quiser.',
-  unsupported: 'Este navegador não expõe geolocalização. Ajuste as coordenadas à mão.',
+  address: 'Centro pelo endereço escolhido.',
+  denied: 'Localização indisponível. Busque um endereço acima.',
+  unsupported: 'Este navegador não expõe geolocalização. Busque um endereço acima.',
 };
+
+async function searchAddress(query: string, signal: AbortSignal): Promise<GeocodeHit[]> {
+  const url = new URL(NOMINATIM_URL);
+  url.searchParams.set('format', 'json');
+  url.searchParams.set('limit', '5');
+  url.searchParams.set('countrycodes', 'br');
+  url.searchParams.set('addressdetails', '0');
+  url.searchParams.set('q', query);
+
+  const response = await fetch(url, {
+    signal,
+    headers: { Accept: 'application/json' },
+  });
+  if (!response.ok) throw new Error('Falha ao buscar endereço.');
+
+  const data: unknown = await response.json();
+  if (!Array.isArray(data)) return [];
+
+  return data.flatMap((item) => {
+    if (
+      typeof item !== 'object' ||
+      item === null ||
+      typeof (item as { display_name?: unknown }).display_name !== 'string' ||
+      typeof (item as { lat?: unknown }).lat !== 'string' ||
+      typeof (item as { lon?: unknown }).lon !== 'string'
+    ) {
+      return [];
+    }
+    const hit = item as { display_name: string; lat: string; lon: string };
+    return [{ displayName: hit.display_name, lat: hit.lat, lon: hit.lon }];
+  });
+}
+
+async function reverseAddress(
+  latitude: number,
+  longitude: number,
+  signal: AbortSignal,
+): Promise<string | null> {
+  const url = new URL(NOMINATIM_REVERSE_URL);
+  url.searchParams.set('format', 'json');
+  url.searchParams.set('lat', String(latitude));
+  url.searchParams.set('lon', String(longitude));
+  url.searchParams.set('zoom', '18');
+  url.searchParams.set('addressdetails', '0');
+
+  const response = await fetch(url, {
+    signal,
+    headers: { Accept: 'application/json' },
+  });
+  if (!response.ok) throw new Error('Falha ao resolver endereço.');
+
+  const data: unknown = await response.json();
+  if (
+    typeof data !== 'object' ||
+    data === null ||
+    typeof (data as { display_name?: unknown }).display_name !== 'string'
+  ) {
+    return null;
+  }
+  return (data as { display_name: string }).display_name;
+}
+
+interface AddressFill {
+  id: number;
+  label: string;
+}
+
+interface AddressFieldProps {
+  disabled: boolean;
+  fill: AddressFill | null;
+  onPick: (hit: GeocodeHit) => void;
+  onEdit: () => void;
+}
+
+function AddressField({ disabled, fill, onPick, onEdit }: AddressFieldProps): ReactElement {
+  const listId = useId();
+  const [query, setQuery] = useState('');
+  const [hits, setHits] = useState<GeocodeHit[]>([]);
+  const [open, setOpen] = useState(false);
+  const [status, setStatus] = useState<'idle' | 'loading' | 'empty' | 'error'>('idle');
+  const [active, setActive] = useState(-1);
+  const abortRef = useRef<AbortController | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const skipSearchRef = useRef(false);
+
+  function commitLabel(label: string): void {
+    skipSearchRef.current = true;
+    setQuery(label);
+    setHits([]);
+    setOpen(false);
+    setStatus('idle');
+    setActive(-1);
+  }
+
+  useEffect(() => {
+    if (!fill) return;
+    commitLabel(fill.label);
+  }, [fill]);
+
+  useEffect(() => {
+    if (skipSearchRef.current) {
+      skipSearchRef.current = false;
+      return;
+    }
+
+    if (timerRef.current) clearTimeout(timerRef.current);
+    abortRef.current?.abort();
+
+    const trimmed = query.trim();
+    if (trimmed.length < GEOCODE_MIN_CHARS) {
+      setHits([]);
+      setOpen(false);
+      setStatus('idle');
+      setActive(-1);
+      return;
+    }
+
+    setStatus('loading');
+    timerRef.current = setTimeout(() => {
+      const controller = new AbortController();
+      abortRef.current = controller;
+      void searchAddress(trimmed, controller.signal)
+        .then((results) => {
+          setHits(results);
+          setOpen(true);
+          setActive(results.length > 0 ? 0 : -1);
+          setStatus(results.length > 0 ? 'idle' : 'empty');
+        })
+        .catch((error: unknown) => {
+          if (error instanceof DOMException && error.name === 'AbortError') return;
+          setHits([]);
+          setOpen(false);
+          setActive(-1);
+          setStatus('error');
+        });
+    }, GEOCODE_DEBOUNCE_MS);
+
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      abortRef.current?.abort();
+    };
+  }, [query]);
+
+  function pick(hit: GeocodeHit): void {
+    commitLabel(hit.displayName);
+    onPick(hit);
+  }
+
+  function onKeyDown(event: KeyboardEvent<HTMLInputElement>): void {
+    if (event.key === 'ArrowDown' && hits.length > 0) {
+      event.preventDefault();
+      setOpen(true);
+      setActive((current) => (current + 1) % hits.length);
+      return;
+    }
+    if (event.key === 'ArrowUp' && hits.length > 0) {
+      event.preventDefault();
+      setOpen(true);
+      setActive((current) => (current <= 0 ? hits.length - 1 : current - 1));
+      return;
+    }
+    if (event.key === 'Enter' && open && active >= 0 && hits[active]) {
+      event.preventDefault();
+      pick(hits[active]);
+      return;
+    }
+    if (event.key === 'Escape') {
+      setOpen(false);
+      setActive(-1);
+    }
+  }
+
+  return (
+    <div className="relative mb-2">
+      <input
+        id="address"
+        className="w-full rounded-xl border border-white/10 bg-stone-900/60 px-3 py-2 text-sm text-stone-100 placeholder:text-stone-500 focus:border-red-500/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-500"
+        value={query}
+        disabled={disabled}
+        placeholder="Rua, bairro, cidade..."
+        aria-label="endereço"
+        autoComplete="off"
+        spellCheck={false}
+        role="combobox"
+        aria-expanded={open}
+        aria-controls={listId}
+        aria-autocomplete="list"
+        aria-activedescendant={active >= 0 ? `${listId}-${active}` : undefined}
+        onChange={(event) => {
+          onEdit();
+          setQuery(event.target.value);
+        }}
+        onKeyDown={onKeyDown}
+        onBlur={() => {
+          // Delay so a mousedown on a suggestion still registers.
+          window.setTimeout(() => setOpen(false), 120);
+        }}
+        onFocus={() => {
+          if (hits.length > 0) setOpen(true);
+        }}
+      />
+      {open && hits.length > 0 && (
+        <ul
+          id={listId}
+          role="listbox"
+          className="absolute z-10 mt-1 max-h-56 w-full overflow-auto rounded-xl border border-white/10 bg-stone-900 py-1 shadow-lg"
+        >
+          {hits.map((hit, index) => (
+            <li key={`${hit.lat},${hit.lon},${hit.displayName}`} role="option" aria-selected={index === active}>
+              <button
+                id={`${listId}-${index}`}
+                type="button"
+                className={`block w-full px-3 py-2 text-left text-sm ${
+                  index === active
+                    ? 'bg-red-500/20 text-stone-50'
+                    : 'text-stone-300 hover:bg-white/5'
+                }`}
+                onMouseDown={(event) => event.preventDefault()}
+                onMouseEnter={() => setActive(index)}
+                onClick={() => pick(hit)}
+              >
+                {hit.displayName}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="mt-1.5 text-xs text-stone-500">
+        {status === 'loading' && 'Buscando endereços...'}
+        {status === 'empty' && 'Nenhum endereço encontrado.'}
+        {status === 'error' && 'Não foi possível buscar o endereço agora.'}
+        {status === 'idle' &&
+          query.trim().length < GEOCODE_MIN_CHARS &&
+          'Digite pelo menos 3 caracteres e escolha uma sugestão.'}
+      </p>
+    </div>
+  );
+}
 
 interface SearchPanelProps {
   form: FormState;
@@ -830,31 +1079,75 @@ function SearchPanel({
   const [geoState, setGeoState] = useState<GeoState>(() =>
     'geolocation' in navigator ? 'locating' : 'unsupported',
   );
+  const [addressFill, setAddressFill] = useState<AddressFill | null>(null);
+  const locateSeq = useRef(0);
+  const reverseAbort = useRef<AbortController | null>(null);
   const calls = plannedRequests(terms);
   const inMemory = terms.length === 0 || terms.some(looksLikeRegex);
 
   const locate = useCallback(() => {
+    const seq = ++locateSeq.current;
+    reverseAbort.current?.abort();
+    const controller = new AbortController();
+    reverseAbort.current = controller;
+
     navigator.geolocation.getCurrentPosition(
       (position) => {
+        if (seq !== locateSeq.current) return;
+
+        const latitude = position.coords.latitude;
+        const longitude = position.coords.longitude;
         onFormChange({
-          lat: position.coords.latitude.toFixed(5),
-          lon: position.coords.longitude.toFixed(5),
+          lat: latitude.toFixed(5),
+          lon: longitude.toFixed(5),
         });
         setGeoState('located');
+
+        void reverseAddress(latitude, longitude, controller.signal)
+          .then((label) => {
+            if (seq !== locateSeq.current || !label) return;
+            setAddressFill({ id: seq, label });
+          })
+          .catch((error: unknown) => {
+            if (error instanceof DOMException && error.name === 'AbortError') return;
+          });
       },
-      () => setGeoState('denied'),
+      () => {
+        if (seq !== locateSeq.current) return;
+        setGeoState('denied');
+      },
       { timeout: 10_000, maximumAge: 60_000 },
     );
   }, [onFormChange]);
 
   useEffect(() => {
     if ('geolocation' in navigator) locate();
+    return () => {
+      locateSeq.current += 1;
+      reverseAbort.current?.abort();
+    };
   }, [locate]);
 
   function retryLocation(): void {
     setGeoState('locating');
     locate();
   }
+
+  function pickAddress(hit: GeocodeHit): void {
+    locateSeq.current += 1;
+    reverseAbort.current?.abort();
+    onFormChange({
+      lat: Number(hit.lat).toFixed(5),
+      lon: Number(hit.lon).toFixed(5),
+    });
+    setGeoState('address');
+  }
+
+  function editAddress(): void {
+    if (geoState === 'located') setGeoState('address');
+  }
+
+  const usingLocation = geoState === 'located' || geoState === 'locating';
 
   return (
     <form
@@ -871,32 +1164,29 @@ function SearchPanel({
           <span className="mb-1.5 block text-xs font-medium tracking-wide text-stone-400 uppercase">
             Centro da busca
           </span>
-          <div className="grid grid-cols-2 gap-2">
-            <input
-              className="w-full rounded-xl border border-white/10 bg-stone-900/60 px-3 py-2 font-mono text-sm text-stone-100 placeholder:text-stone-500 focus:border-red-500/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-500"
-              value={form.lat}
-              inputMode="decimal"
-              aria-label="latitude"
-              placeholder="latitude"
-              onChange={(event) => onFormChange({ lat: event.target.value })}
-            />
-            <input
-              className="w-full rounded-xl border border-white/10 bg-stone-900/60 px-3 py-2 font-mono text-sm text-stone-100 placeholder:text-stone-500 focus:border-red-500/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-500"
-              value={form.lon}
-              inputMode="decimal"
-              aria-label="longitude"
-              placeholder="longitude"
-              onChange={(event) => onFormChange({ lon: event.target.value })}
-            />
-          </div>
+          <AddressField
+            disabled={loading}
+            fill={addressFill}
+            onPick={pickAddress}
+            onEdit={editAddress}
+          />
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={retryLocation}
               disabled={geoState === 'locating' || geoState === 'unsupported'}
-              className="rounded-lg border border-white/10 px-2.5 py-1 text-xs text-stone-300 hover:bg-white/5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-500 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+              aria-pressed={geoState === 'located'}
+              className={`rounded-lg border px-2.5 py-1 text-xs font-medium transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-500 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent ${
+                usingLocation
+                  ? 'border-red-500/60 bg-red-500/20 text-red-300'
+                  : 'border-white/10 text-stone-300 hover:bg-white/5'
+              }`}
             >
-              {geoState === 'locating' ? 'Localizando...' : 'Usar minha localização'}
+              {geoState === 'locating'
+                ? 'Localizando...'
+                : geoState === 'located'
+                  ? 'Usando minha localização'
+                  : 'Usar minha localização'}
             </button>
           </div>
           <p
@@ -1006,9 +1296,9 @@ const queryClient = new QueryClient({
 });
 
 const INITIAL_FORM: FormState = {
-  lat: String(FALLBACK_LAT),
-  lon: String(FALLBACK_LON),
-  radius: MAX_RADIUS,
+  lat: '',
+  lon: '',
+  radius: DEFAULT_RADIUS,
   benefits: ['RESTAURANTE'],
 };
 
@@ -1061,7 +1351,7 @@ function SearchPage(): ReactElement {
     const latitude = parseCoordinate(form.lat);
     const longitude = parseCoordinate(form.lon);
     if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
-      setFormError('Latitude e longitude precisam ser números, por exemplo -3.735 e -38.505.');
+      setFormError('Escolha um endereço ou use sua localização.');
       return;
     }
 
