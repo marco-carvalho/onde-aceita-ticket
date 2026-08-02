@@ -809,9 +809,10 @@ interface GeocodeHit {
   lon: string;
 }
 
-type GeoState = 'locating' | 'located' | 'denied' | 'unsupported' | 'address';
+type GeoState = 'idle' | 'locating' | 'located' | 'denied' | 'unsupported' | 'address';
 
 const GEO_MESSAGE: Record<GeoState, string> = {
+  idle: 'Busque um endereço ou use sua localização.',
   locating: 'Buscando sua localização...',
   located: 'Centro na sua localização atual.',
   address: 'Centro pelo endereço escolhido.',
@@ -890,9 +891,10 @@ interface AddressFieldProps {
   fill: AddressFill | null;
   onPick: (hit: GeocodeHit) => void;
   onEdit: () => void;
+  onClear: () => void;
 }
 
-function AddressField({ disabled, fill, onPick, onEdit }: AddressFieldProps): ReactElement {
+function AddressField({ disabled, fill, onPick, onEdit, onClear }: AddressFieldProps): ReactElement {
   const listId = useId();
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<GeocodeHit[]>([]);
@@ -910,6 +912,18 @@ function AddressField({ disabled, fill, onPick, onEdit }: AddressFieldProps): Re
     setOpen(false);
     setStatus('idle');
     setActive(-1);
+  }
+
+  function clear(): void {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    abortRef.current?.abort();
+    skipSearchRef.current = true;
+    setQuery('');
+    setHits([]);
+    setOpen(false);
+    setStatus('idle');
+    setActive(-1);
+    onClear();
   }
 
   useEffect(() => {
@@ -992,33 +1006,51 @@ function AddressField({ disabled, fill, onPick, onEdit }: AddressFieldProps): Re
 
   return (
     <div className="relative mb-2">
-      <input
-        id="address"
-        className="w-full rounded-xl border border-white/10 bg-stone-900/60 px-3 py-2 text-sm text-stone-100 placeholder:text-stone-500 focus:border-red-500/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-500"
-        value={query}
-        disabled={disabled}
-        placeholder="Rua, bairro, cidade..."
-        aria-label="endereço"
-        autoComplete="off"
-        spellCheck={false}
-        role="combobox"
-        aria-expanded={open}
-        aria-controls={listId}
-        aria-autocomplete="list"
-        aria-activedescendant={active >= 0 ? `${listId}-${active}` : undefined}
-        onChange={(event) => {
-          onEdit();
-          setQuery(event.target.value);
-        }}
-        onKeyDown={onKeyDown}
-        onBlur={() => {
-          // Delay so a mousedown on a suggestion still registers.
-          window.setTimeout(() => setOpen(false), 120);
-        }}
-        onFocus={() => {
-          if (hits.length > 0) setOpen(true);
-        }}
-      />
+      <div className="relative">
+        <input
+          id="address"
+          className={`w-full rounded-xl border border-white/10 bg-stone-900/60 py-2 pl-3 text-sm text-stone-100 placeholder:text-stone-500 focus:border-red-500/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-500 ${
+            query ? 'pr-10' : 'pr-3'
+          }`}
+          value={query}
+          disabled={disabled}
+          placeholder="Rua, bairro, cidade..."
+          aria-label="endereço"
+          autoComplete="off"
+          spellCheck={false}
+          role="combobox"
+          aria-expanded={open}
+          aria-controls={listId}
+          aria-autocomplete="list"
+          aria-activedescendant={active >= 0 ? `${listId}-${active}` : undefined}
+          onChange={(event) => {
+            onEdit();
+            setQuery(event.target.value);
+          }}
+          onKeyDown={onKeyDown}
+          onBlur={() => {
+            // Delay so a mousedown on a suggestion still registers.
+            window.setTimeout(() => setOpen(false), 120);
+          }}
+          onFocus={() => {
+            if (hits.length > 0) setOpen(true);
+          }}
+        />
+        {query !== '' && (
+          <button
+            type="button"
+            disabled={disabled}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={clear}
+            aria-label="limpar endereço"
+            className="absolute top-1/2 right-2 grid size-7 -translate-y-1/2 place-items-center rounded-lg text-stone-400 hover:bg-white/10 hover:text-stone-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-500 disabled:opacity-40"
+          >
+            <span aria-hidden="true" className="text-base leading-none">
+              ×
+            </span>
+          </button>
+        )}
+      </div>
       {open && hits.length > 0 && (
         <ul
           id={listId}
@@ -1147,6 +1179,14 @@ function SearchPanel({
     if (geoState === 'located') setGeoState('address');
   }
 
+  function clearAddress(): void {
+    locateSeq.current += 1;
+    reverseAbort.current?.abort();
+    setAddressFill(null);
+    onFormChange({ lat: '', lon: '' });
+    setGeoState('geolocation' in navigator ? 'idle' : 'unsupported');
+  }
+
   const usingLocation = geoState === 'located' || geoState === 'locating';
 
   return (
@@ -1169,6 +1209,7 @@ function SearchPanel({
             fill={addressFill}
             onPick={pickAddress}
             onEdit={editAddress}
+            onClear={clearAddress}
           />
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <button
