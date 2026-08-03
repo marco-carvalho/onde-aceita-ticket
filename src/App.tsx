@@ -888,22 +888,28 @@ interface AddressFill {
 
 interface AddressFieldProps {
   disabled: boolean;
-  fill: AddressFill | null;
+  initialQuery?: string;
   onPick: (hit: GeocodeHit) => void;
   onEdit: () => void;
   onClear: () => void;
 }
 
-function AddressField({ disabled, fill, onPick, onEdit, onClear }: AddressFieldProps): ReactElement {
+function AddressField({
+  disabled,
+  initialQuery = '',
+  onPick,
+  onEdit,
+  onClear,
+}: AddressFieldProps): ReactElement {
   const listId = useId();
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState(initialQuery);
   const [hits, setHits] = useState<GeocodeHit[]>([]);
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<'idle' | 'loading' | 'empty' | 'error'>('idle');
   const [active, setActive] = useState(-1);
   const abortRef = useRef<AbortController | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const skipSearchRef = useRef(false);
+  const skipSearchRef = useRef(initialQuery !== '');
 
   function commitLabel(label: string): void {
     skipSearchRef.current = true;
@@ -925,11 +931,6 @@ function AddressField({ disabled, fill, onPick, onEdit, onClear }: AddressFieldP
     setActive(-1);
     onClear();
   }
-
-  useEffect(() => {
-    if (!fill) return;
-    commitLabel(fill.label);
-  }, [fill]);
 
   useEffect(() => {
     if (skipSearchRef.current) {
@@ -1095,7 +1096,7 @@ interface SearchPanelProps {
   loading: boolean;
   onFormChange: (patch: Partial<FormState>) => void;
   onTermsChange: (terms: string[]) => void;
-  onSubmit: () => void;
+  onSubmit: (coords?: { lat: string; lon: string }) => void;
   onCancel: () => void;
 }
 
@@ -1114,46 +1115,49 @@ function SearchPanel({
   const [addressFill, setAddressFill] = useState<AddressFill | null>(null);
   const locateSeq = useRef(0);
   const reverseAbort = useRef<AbortController | null>(null);
+  const onSubmitRef = useRef(onSubmit);
+  onSubmitRef.current = onSubmit;
   const calls = plannedRequests(terms);
   const inMemory = terms.length === 0 || terms.some(looksLikeRegex);
 
-  const locate = useCallback(() => {
-    const seq = ++locateSeq.current;
-    reverseAbort.current?.abort();
-    const controller = new AbortController();
-    reverseAbort.current = controller;
+  const locate = useCallback(
+    (autoSubmit = false) => {
+      const seq = ++locateSeq.current;
+      reverseAbort.current?.abort();
+      const controller = new AbortController();
+      reverseAbort.current = controller;
 
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        if (seq !== locateSeq.current) return;
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          if (seq !== locateSeq.current) return;
 
-        const latitude = position.coords.latitude;
-        const longitude = position.coords.longitude;
-        onFormChange({
-          lat: latitude.toFixed(5),
-          lon: longitude.toFixed(5),
-        });
-        setGeoState('located');
+          const lat = position.coords.latitude.toFixed(5);
+          const lon = position.coords.longitude.toFixed(5);
+          onFormChange({ lat, lon });
+          setGeoState('located');
+          if (autoSubmit) onSubmitRef.current({ lat, lon });
 
-        void reverseAddress(latitude, longitude, controller.signal)
-          .then((label) => {
-            if (seq !== locateSeq.current || !label) return;
-            setAddressFill({ id: seq, label });
-          })
-          .catch((error: unknown) => {
-            if (error instanceof DOMException && error.name === 'AbortError') return;
-          });
-      },
-      () => {
-        if (seq !== locateSeq.current) return;
-        setGeoState('denied');
-      },
-      { timeout: 10_000, maximumAge: 60_000 },
-    );
-  }, [onFormChange]);
+          void reverseAddress(position.coords.latitude, position.coords.longitude, controller.signal)
+            .then((label) => {
+              if (seq !== locateSeq.current || !label) return;
+              setAddressFill({ id: seq, label });
+            })
+            .catch((error: unknown) => {
+              if (error instanceof DOMException && error.name === 'AbortError') return;
+            });
+        },
+        () => {
+          if (seq !== locateSeq.current) return;
+          setGeoState('denied');
+        },
+        { timeout: 10_000, maximumAge: 60_000 },
+      );
+    },
+    [onFormChange],
+  );
 
   useEffect(() => {
-    if ('geolocation' in navigator) locate();
+    if ('geolocation' in navigator) locate(true);
     return () => {
       locateSeq.current += 1;
       reverseAbort.current?.abort();
@@ -1205,8 +1209,9 @@ function SearchPanel({
             Centro da busca
           </span>
           <AddressField
+            key={addressFill?.id ?? 'empty'}
             disabled={loading}
-            fill={addressFill}
+            initialQuery={addressFill?.label ?? ''}
             onPick={pickAddress}
             onEdit={editAddress}
             onClear={clearAddress}
@@ -1388,9 +1393,9 @@ function SearchPage(): ReactElement {
     void client.cancelQueries({ queryKey: ['merchants', search], exact: true });
   }
 
-  function submit(): void {
-    const latitude = parseCoordinate(form.lat);
-    const longitude = parseCoordinate(form.lon);
+  function submit(coords?: { lat: string; lon: string }): void {
+    const latitude = parseCoordinate(coords?.lat ?? form.lat);
+    const longitude = parseCoordinate(coords?.lon ?? form.lon);
     if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
       setFormError('Escolha um endereço ou use sua localização.');
       return;
